@@ -1,0 +1,66 @@
+{
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "storage": {
+    "rules": "storage.rules"
+  },
+  "hosting": {
+    "public": "build/web",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  },
+  "emulators": {
+    "auth": {
+      "port": 9099
+    },
+    "firestore": {
+      "port": 8080
+    },
+    "storage": {
+      "port": 9199
+    },
+    "functions": {
+      "port": 5001
+    },
+    "ui": {
+      "enabled": true
+    },
+    "hosting": {
+      "port": 5000
+    },
+    "singleProjectMode": true
+  },
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "foodsnap-d1d7e",
+          "appId": "1:106604321786:android:4611dffe0f9d5f3e06a243",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "foodsnap-d1d7e",
+          "configurations": {
+            "android": "1:106604321786:android:4611dffe0f9d5f3e06a243",
+            "web": "1:106604321786:web:1e46480e594234e106a243"
+          }
+        }
+      }
+    }
+  },
+  "functions": {
+    "source": "functions"
+  }
+}
