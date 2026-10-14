@@ -1,0 +1,25 @@
+{
+  "name": "functions",
+  "description": "FoodSnap Cloud Functions (v2, Node 20, asia-south1). Trusted logic per TECH_SPEC §7.",
+  "private": true,
+  "engines": {
+    "node": "20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "serve": "npm run build && firebase emulators:start --only functions",
+    "test": "cd .. && firebase emulators:exec --project demo-foodsnap --only firestore \"npm --prefix functions run test:exec\"",
+    "test:exec": "mocha --exit --timeout 15000 --require ts-node/register test/*.test.ts"
+  },
+  "dependencies": {
+    "firebase-admin": "^12",
+    "firebase-functions": "^6"
+  },
+  "devDependencies": {
+    "@types/mocha": "^2",
+    "@types/node": "^22",
+    "mocha": "^11",
+    "ts-node": "^10",
+    "typescript": "^5"
+  }
+}
