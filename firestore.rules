@@ -1,0 +1,196 @@
+rules_version = '2';
+
+// FoodSnap v1 — behavior per TECH_SPEC §6. Full suite in rules_test/.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function rel(relId) {
+      return get(/databases/$(database)/documents/relationships/$(relId)).data;
+    }
+
+    function isMember(relId) {
+      return isSignedIn()
+        && (rel(relId).clientId == request.auth.uid
+          || rel(relId).dieticianId == request.auth.uid);
+    }
+
+    function isClientOf(relId) {
+      return isSignedIn() && rel(relId).clientId == request.auth.uid;
+    }
+
+    function isDieticianOf(relId) {
+      return isSignedIn() && rel(relId).dieticianId == request.auth.uid;
+    }
+
+    function userRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function inviteOf(code) {
+      return get(/databases/$(database)/documents/invites/$(code)).data;
+    }
+
+    // --- users/{uid} ---
+    match /users/{uid} {
+      allow get: if isSignedIn() && uid == request.auth.uid;
+      allow list: if false;
+      allow create: if isSignedIn()
+        && uid == request.auth.uid
+        && request.resource.data.role in ['client', 'dietician']
+        && request.resource.data.keys().hasOnly(
+          ['role', 'displayName', 'email', 'timezone', 'createdAt']);
+      // Role immutable after creation.
+      allow update: if isSignedIn()
+        && uid == request.auth.uid
+        && request.resource.data.role == resource.data.role;
+      allow delete: if false;
+
+      match /tokens/{t} {
+        allow read, write: if isSignedIn() && uid == request.auth.uid;
+      }
+    }
+
+    // --- invites/{code} ---
+    // Spark-only pairing (TECH_SPEC §17): the client claims the invite and
+    // creates its relationship in one transaction; rules validate the invite.
+    // Anyone signed in may GET a single invite (codes are unguessable);
+    // listing stays owner-only. Revoking stays owner-only.
+    match /invites/{code} {
+      allow create: if isSignedIn()
+        && userRole() == 'dietician'
+        && request.resource.data.dieticianId == request.auth.uid
+        // 15 min tolerance: expiresAt is device-computed; device clocks
+        // routinely run seconds ahead of request.time.
+        && request.resource.data.expiresAt
+          <= request.time + duration.value(48, 'h') + duration.value(15, 'm')
+        && request.resource.data.usedBy == null
+        && request.resource.data.revoked == false
+        && request.resource.data.keys().hasOnly(
+          ['dieticianId', 'dieticianName', 'createdAt', 'expiresAt',
+           'usedBy', 'usedAt', 'revoked']);
+      allow get: if isSignedIn();
+      allow list: if isSignedIn()
+        && resource.data.dieticianId == request.auth.uid;
+      allow update: if isSignedIn()
+        && (
+          // Owner revokes.
+          (resource.data.dieticianId == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revoked'])
+            && request.resource.data.revoked == true)
+          ||
+          // Client claims a valid, unused invite (one-shot; see §17).
+          // One-relationship is enforced by the deterministic rel id in the
+          // create rule below (rules paths cannot interpolate expressions).
+          (userRole() == 'client'
+            && resource.data.revoked == false
+            && resource.data.usedBy == null
+            && resource.data.expiresAt > request.time
+            && request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['usedBy', 'usedAt'])
+            && request.resource.data.usedBy == request.auth.uid
+            && request.resource.data.usedAt == request.time)
+        );
+      allow delete: if false;
+    }
+
+    // --- relationships/{relId} ---
+    // Spark-only: a client creates exactly one relationship, at the
+    // deterministic id `rel_{uid}`, validated against its invite (§17).
+    // Deletes stay forbidden; updates limited to own unread reset.
+    match /relationships/{relId} {
+      // resource == null lets a client probe its own future doc id.
+      allow get: if resource == null || isMember(relId);
+      allow list: if isSignedIn()
+        && (resource.data.clientId == request.auth.uid
+          || resource.data.dieticianId == request.auth.uid);
+      allow create: if isSignedIn()
+        && userRole() == 'client'
+        && relId == 'rel_' + request.auth.uid
+        && request.resource.data.clientId == request.auth.uid
+        && request.resource.data.status == 'active'
+        && request.resource.data.streakCount == 0
+        && request.resource.data.unreadForDietician == 0
+        && request.resource.data.unreadForClient == 0
+        && request.resource.data.lastMealAt == null
+        && request.resource.data.lastMealTag == null
+        && request.resource.data.lastMealLocalDate == null
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.lastActivityAt == request.time
+        && request.resource.data.keys().hasOnly(
+          ['dieticianId', 'clientId', 'dieticianName', 'clientName',
+           'status', 'createdAt', 'lastMealAt', 'lastMealTag',
+           'lastMealLocalDate', 'streakCount', 'unreadForDietician',
+           'unreadForClient', 'lastActivityAt', 'inviteCode'])
+        && inviteOf(request.resource.data.inviteCode).dieticianId
+            == request.resource.data.dieticianId
+        && inviteOf(request.resource.data.inviteCode).dieticianName
+            == request.resource.data.dieticianName
+        && inviteOf(request.resource.data.inviteCode).revoked == false
+        && inviteOf(request.resource.data.inviteCode).usedBy == null
+        && inviteOf(request.resource.data.inviteCode).expiresAt > request.time
+        && request.resource.data.clientName
+            == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.displayName;
+      allow delete: if false;
+      // Each side may reset only its own unread counter, and only to 0.
+      allow update: if isMember(relId)
+        && (
+          (rel(relId).clientId == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['unreadForClient'])
+            && request.resource.data.unreadForClient == 0)
+          ||
+          (rel(relId).dieticianId == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['unreadForDietician'])
+            && request.resource.data.unreadForDietician == 0)
+        );
+
+      // --- meals ---
+      match /meals/{mealId} {
+        allow get, list: if isMember(relId);
+        allow create: if isClientOf(relId)
+          && request.resource.data.clientId == request.auth.uid
+          && request.resource.data.mealTag in
+            ['breakfast', 'lunch', 'snack', 'dinner']
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.calories == null
+          && request.resource.data.caloriesSource == null
+          && request.resource.data.reaction == null
+          && request.resource.data.dieticianComment == null
+          && (!('note' in request.resource.data)
+            || request.resource.data.note == null
+            || request.resource.data.note.size() <= 200)
+          && request.resource.data.keys().hasOnly(
+            ['clientId', 'mealTag', 'note', 'photoUrl', 'thumbUrl',
+             'photoPath', 'thumbPath', 'createdAt', 'localDate', 'localTime',
+             'reaction', 'dieticianComment', 'calories', 'caloriesSource']);
+        allow update: if isDieticianOf(relId)
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['reaction', 'dieticianComment'])
+          && (request.resource.data.reaction == null
+            || request.resource.data.reaction in ['👍', '❤️', '👏', '😬'])
+          && (!('dieticianComment' in request.resource.data)
+            || request.resource.data.dieticianComment == null
+            || request.resource.data.dieticianComment.size() <= 300);
+        allow delete: if isClientOf(relId);
+      }
+
+      // --- messages ---
+      match /messages/{msgId} {
+        allow get, list: if isMember(relId);
+        allow create: if isMember(relId)
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.text.size() >= 1
+          && request.resource.data.text.size() <= 1000
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.keys()
+            .hasOnly(['senderId', 'text', 'createdAt']);
+        allow update, delete: if false;
+      }
+    }
+  }
+}

@@ -1,0 +1,34 @@
+rules_version = '2';
+
+// FoodSnap v1 — behavior per TECH_SPEC §6 (path meals/{relId}/{fileName}).
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function relData(relId) {
+      return firestore.get(
+        /databases/(default)/documents/relationships/$(relId)).data;
+    }
+    function isMember(relId) {
+      return isSignedIn()
+        && (relData(relId).clientId == request.auth.uid
+          || relData(relId).dieticianId == request.auth.uid);
+    }
+    function isClientOf(relId) {
+      return isSignedIn() && relData(relId).clientId == request.auth.uid;
+    }
+
+    match /meals/{relId}/{fileName} {
+      allow get: if isMember(relId);
+      allow create, update: if isClientOf(relId)
+        && request.resource.size < 3 * 1024 * 1024
+        && request.resource.contentType.matches('image/jpeg');
+      allow delete: if isClientOf(relId);
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

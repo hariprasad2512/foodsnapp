@@ -1,0 +1,15 @@
+{
+  "name": "foodsnap-rules-test",
+  "private": true,
+  "description": "FoodSnap security rules tests (TECH_SPEC §6, §13) — run against the Firebase emulators.",
+  "type": "module",
+  "scripts": {
+    "test": "cd .. && firebase emulators:exec --project demo-foodsnap --only firestore,storage \"npx --prefix rules_test mocha --exit --timeout 15000 rules_test/test\""
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^3",
+    "firebase": "^13.0.0",
+    "firebase-admin": "^12",
+    "mocha": "^11"
+  }
+}
