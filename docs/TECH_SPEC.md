@@ -122,14 +122,12 @@ Alphabet: `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (no I, O, 0, 1).
 
 Constraint: a client can be in **at most one** active relationship in v1 (enforced in `redeemInvite`).
 
-### `relationships/{relId}/meals/{mealId}`
+### `relationships/{relId}/meals/{mealId}` (metadata only)
 | Field | Type | Notes |
 |---|---|---|
 | `clientId` | string | = auth uid at creation |
 | `mealTag` | `"breakfast"`\|`"lunch"`\|`"snack"`\|`"dinner"` | |
 | `note` | string \| null | ≤ 200 chars |
-| `photoUrl`, `thumbUrl` | string | Download URLs |
-| `photoPath`, `thumbPath` | string | Storage paths (for deletion) |
 | `createdAt` | timestamp | server time |
 | `localDate` | string | `yyyy-MM-dd` in the **client's** local time; used for grouping and streaks |
 | `localTime` | string | `HH:mm` |
@@ -137,6 +135,13 @@ Constraint: a client can be in **at most one** active relationship in v1 (enforc
 | `dieticianComment` | string \| null | ≤ 300 chars |
 | `calories` | int \| null | **Reserved for v2**, always null in v1 |
 | `caloriesSource` | `"dietician"`\|`"ai"`\|`"user"` \| null | **Reserved for v2** |
+
+### `relationships/{relId}/meals/{mealId}/assets/{assetId}` (Spark image store, §17)
+`assetId` is `"photo"` (1280 px JPEG, ≤ 800 KB) or `"thumb"` (360 px JPEG,
+≤ 150 KB). Single field: `{ data: bytes }`. Immutable after creation
+(no update/delete); deleting a meal deletes its assets client-side in the
+same batch (M7). Kept out of the meal doc so list queries (timeline,
+history) never download full-res photos.
 
 ### `relationships/{relId}/messages/{msgId}`
 `{ senderId, text (1–1000 chars), createdAt }`
@@ -181,10 +186,17 @@ relationships/{relId}/meals/{mealId}
   read:   isMember(relId)
   create: isClientOf(relId), clientId == auth.uid, mealTag in allowed set,
           createdAt == request.time, note/comment length limits,
-          calories == null, keys limited to the schema
+          calories == null, keys limited to the metadata schema
+          (no image fields — bytes live in `assets`)
   update: isDieticianOf(relId), affectedKeys hasOnly ['reaction','dieticianComment'],
           reaction in ['👍','❤️','👏','😬', null], comment length ≤ 300
   delete: isClientOf(relId)
+
+relationships/{relId}/meals/{mealId}/assets/{assetId}   (Spark store, §17)
+  read (get only, no list): isMember(relId)
+  create: isClientOf(relId), assetId in ['photo','thumb'], data is bytes,
+          only key is ['data'], photo ≤ 800 KB, thumb ≤ 150 KB
+  update, delete: false   (meal delete removes assets client-side, M7)
 
 relationships/{relId}/messages/{msgId}
   read:   isMember(relId)
@@ -205,7 +217,7 @@ relationships/{relId}/messages/{msgId}
 | `onMealCreated` | `relationships/{relId}/meals/{mealId}` create | Updates `lastMealAt`, `lastMealTag`, `lastActivityAt`; updates streak (see below); `unreadForDietician += 1`; sends push to the dietician: title = client name, body = `"{Tag} 🍽️"` (+ note if any). |
 | `onMealUpdated` | meal update | If `reaction` or `dieticianComment` changed → `unreadForClient += 1`, push to the client: title = dietician name, body = reaction + comment. |
 | `onMessageCreated` | message create | Increments the other side's unread counter, updates `lastActivityAt`, pushes the text (truncated to 100 chars). |
-| `onMealDeleted` | meal delete | Deletes `photoPath` and `thumbPath` from Storage. |
+| `onMealDeleted` | meal delete | (Blaze design) Deletes `photoPath` and `thumbPath` from Storage. On Spark (§17) there is no function: M7 deletes the meal doc and its `assets` in one client batch. |
 
 **Streak logic (in `onMealCreated`)**: let `d = meal.localDate`, `last = relationship.lastMealLocalDate`.
 - `last == null` → streak = 1
@@ -235,10 +247,10 @@ Then set `lastMealLocalDate = max(d, last)`. Use pure date-string math (no timez
 1. `CaptureService` returns an image (`camera` plugin on Android; `image_picker` on web).
 2. S06: tag preselected via `tagForTime(DateTime.now())`; note optional.
 3. On Send: generate `mealId` locally (`doc().id`), build `localDate`/`localTime` from the device clock.
-4. In an isolate: decode, fix orientation, resize to **1280 px long edge** JPEG q80 (`photo`) and **360 px** JPEG q75 (`thumb`).
-5. Upload both to `meals/{relId}/{mealId}.jpg` and `meals/{relId}/{mealId}_thumb.jpg`; fetch download URLs.
-6. Create the meal doc (rules require `createdAt == request.time`, so use `serverTimestamp()`).
-7. UI state machine for the chip: `sending → sent | failed(retry)`. The processed bytes are kept in memory for retry. (No persistent offline queue in v1.)
+4. In an isolate: decode, fix orientation, resize to **1280 px long edge** JPEG q80 (`photo`) and **360 px** JPEG q75 (`thumb`), stepping quality down until the photo fits 700 KB (Firestore 1 MiB doc cap; rules enforce 800/150 KB).
+5. One atomic Firestore batch: the meal metadata doc plus `assets/photo` and `assets/thumb` byte docs (Spark store, §17 — no Storage bucket on the free tier).
+6. `createdAt` uses `serverTimestamp()` (rules require `createdAt == request.time`).
+7. UI state machine for the chip: `sending → sent | failed(retry)`. The processed bytes are kept in memory for retry; Firestore persistence additionally queues the batch while offline (§11).
 
 ### 9.2 Pairing
 1. Dietician opens S11 → client generates a random code from the allowed alphabet, writes `invites/{code}` (retry on collision).
@@ -280,11 +292,17 @@ Read `streakCount` and `lastMealLocalDate` from the relationship. If `lastMealLo
 - Global error handling: show a snackbar for unexpected errors; log to console (no crash-reporting SDK in v1).
 - Use `AsyncValue` everywhere: every screen has loading, error, and empty states as defined in the UI spec.
 
-## 12. Image handling rules
+## 12. Image handling rules (Spark store, §17)
 
 - Never upload the raw camera image. Always resize/compress (§9.1).
+- Renditions are stored as Firestore byte Blobs under `meals/{mealId}/assets/`
+  (no Storage bucket on the free tier). The pipeline guarantees the photo
+  fits 700 KB (rules cap 800 KB) so docs stay under the 1 MiB limit.
 - Strip EXIF GPS (re-encoding through `image` does this).
-- Use `cached_network_image` (or equivalent) for thumbnails; the History and Clients screens use `thumbUrl` only; the Meal Detail screen loads `photoUrl`.
+- Meal lists (timeline, history) read the metadata docs only and fetch each
+  visible `thumb` asset on demand; the Meal Detail screen fetches `photo`.
+  Bytes are cached in memory per session (no `cached_network_image` — there
+  are no download URLs on Spark).
 
 ## 13. Testing
 
@@ -303,8 +321,8 @@ Each milestone ends with something runnable and a short manual check.
 | M1 | Rules + emulator tests | `firestore.rules`, `storage.rules` written; all §13 rules tests pass |
 | M2 | Auth + role (S01, S02) | Email sign-up works; profile doc created; redirects land correctly per §8 |
 | M3 | Pairing (S03, S10 empty, S11, `redeemInvite`) | Dietician creates a code; a second account redeems it; both see the relationship; second redeem fails |
-| M4 | Capture → send (S05, S06, upload pipeline) | Meal appears in Firestore + Storage with thumbnail; chip shows sent/failed; web variant works |
-| M5 | Notifications + PWA | FCM tokens saved; dietician gets a push on Android and on an installed iPhone PWA; S14 banners |
+| M4 | Capture → send (S05, S06, upload pipeline) | Meal appears in Firestore (metadata + `assets` blobs); chip shows sent/failed; web variant works |
+| M5 | Notifications + PWA (Spark scope, §17) | Batch send works on-device; S13 settings complete; PWA installable from Hosting; S14 banners hidden |
 | M6 | Timeline (S07, S12 timeline) | Merged meals + messages, realtime, unread counters, text chat both ways |
 | M7 | History + Meal detail (S08, S09) | Day grouping, week dots, pagination, swipe between meals, delete |
 | M8 | Dietician feedback | Reactions, comments, quick-reply chips, push to client |
@@ -320,7 +338,7 @@ Each milestone ends with something runnable and a short manual check.
 
 ## 16. Risks and open decisions
 
-1. **Firebase plan:** Cloud Functions need the **Blaze (pay-as-you-go)** plan, and new Cloud Storage buckets may also require it. Check the console before M0. For two-digit user counts the usage stays inside the free quotas, but set a **budget alert**. If Blaze is not acceptable, the fallback is Supabase (Auth, Postgres, Storage, Edge Functions) with the same data model.
+1. **Firebase plan:** Cloud Functions need the **Blaze (pay-as-you-go)** plan, and (confirmed M5) new Cloud Storage buckets also require it — uploads 404 without one. The Spark architecture (§17) avoids both: pairing via client transaction + rules, images as Firestore Blobs (~350 KB/meal ≈ 3,000 meals per free 1 GiB). Set a **budget alert** if Blaze ever lands. If Blaze is not acceptable long-term, the fallback is Supabase (Auth, Postgres, Storage, Edge Functions) with the same data model.
 2. **iOS PWA quirks:** push and install behavior differs from Android. Validate on a real iPhone at M5, not at the end.
 3. **Flutter web camera:** the live viewfinder is not used on web by design (uses the browser's native camera via `image_picker`).
 4. **No persistent upload queue:** if the app is killed mid-upload the photo is lost. Acceptable for v1; revisit if it happens in practice.

@@ -15,6 +15,7 @@ import {
   runTransaction,
   serverTimestamp,
   Timestamp,
+  Bytes,
 } from 'firebase/firestore';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -32,10 +33,6 @@ const mealDoc = (over = {}) => ({
   clientId: 'alice',
   mealTag: 'lunch',
   note: 'yummy',
-  photoUrl: 'https://x/y.jpg',
-  thumbUrl: 'https://x/y_thumb.jpg',
-  photoPath: 'meals/rel1/m1.jpg',
-  thumbPath: 'meals/rel1/m1_thumb.jpg',
   createdAt: serverTimestamp(),
   localDate: '2026-10-14',
   localTime: '13:40',
@@ -44,6 +41,11 @@ const mealDoc = (over = {}) => ({
   calories: null,
   caloriesSource: null,
   ...over,
+});
+
+// Bytes payload for asset docs (small stand-ins; size caps use the same path).
+const assetDoc = (bytes = new Uint8Array(100)) => ({
+  data: Bytes.fromUint8Array(bytes),
 });
 
 describe('firestore rules (TECH_SPEC §6)', () => {
@@ -296,6 +298,39 @@ describe('meals', () => {
   it('client can delete own meal; dietician cannot', async () => {
     await assertFails(deleteDoc(doc(dieter().firestore(), 'relationships/rel1/meals/m1')));
     await assertSucceeds(deleteDoc(doc(alice().firestore(), 'relationships/rel1/meals/m1')));
+  });
+});
+
+describe('meal assets (Spark storage, TECH_SPEC §17)', () => {
+  const asset = (id) => doc(alice().firestore(), `relationships/rel1/meals/m1/assets/${id}`);
+  it('members can read by id; outsiders cannot; list is denied', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'relationships/rel1/meals/m1/assets/thumb'), assetDoc());
+    });
+    await assertSucceeds(getDoc(doc(alice().firestore(), 'relationships/rel1/meals/m1/assets/thumb')));
+    await assertSucceeds(getDoc(doc(dieter().firestore(), 'relationships/rel1/meals/m1/assets/thumb')));
+    await assertFails(getDoc(doc(bob().firestore(), 'relationships/rel1/meals/m1/assets/thumb')));
+    await assertFails(getDocs(collection(alice().firestore(), 'relationships/rel1/meals/m1/assets')));
+  });
+  it('client can create photo/thumb within caps; others cannot', async () => {
+    await assertSucceeds(setDoc(asset('photo'), assetDoc(new Uint8Array(700 * 1024))));
+    await assertSucceeds(setDoc(asset('thumb'), assetDoc(new Uint8Array(100 * 1024))));
+    await assertFails(setDoc(doc(bob().firestore(), 'relationships/rel1/meals/m1/assets/photo'), assetDoc()));
+    await assertFails(setDoc(doc(dieter().firestore(), 'relationships/rel1/meals/m1/assets/photo'), assetDoc()));
+  });
+  it('create rejects bad id, non-bytes, oversize, extra keys', async () => {
+    await assertFails(setDoc(asset('raw'), assetDoc()));
+    await assertFails(setDoc(asset('photo'), { data: 'not-bytes' }));
+    await assertFails(setDoc(asset('photo'), assetDoc(new Uint8Array(800 * 1024 + 1))));
+    await assertFails(setDoc(asset('thumb'), assetDoc(new Uint8Array(150 * 1024 + 1))));
+    await assertFails(setDoc(asset('photo'), { ...assetDoc(), extra: 1 }));
+  });
+  it('assets are immutable', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'relationships/rel1/meals/m1/assets/photo'), assetDoc());
+    });
+    await assertFails(updateDoc(asset('photo'), assetDoc()));
+    await assertFails(deleteDoc(asset('photo')));
   });
 });
 

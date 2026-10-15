@@ -40,5 +40,22 @@ void main() {
       expect(authErrorMessage(err('email-already-in-use')), isNotEmpty);
       expect(authErrorMessage(err('bogus-code')), 'Something went wrong. Try again.');
     });
+    test('web popup failures stay diagnosable', () {
+      expect(
+        authErrorMessage(err('popup-blocked')),
+        'The sign-in popup was blocked. Allow popups and try again.',
+      );
+      expect(
+        authErrorMessage(err('unauthorized-domain')),
+        contains("isn't authorized"),
+      );
+      expect(authErrorMessage(err('too-many-requests')), contains('Too many'));
+      expect(authErrorMessage(err('operation-not-allowed')), contains('another one'));
+    });
+    test('user dismissal is silent on both platforms', () {
+      expect(isSignInDismissal(err('popup-closed-by-user')), isTrue);
+      expect(isSignInDismissal(err('popup-blocked')), isFalse);
+      expect(isSignInDismissal(err('invalid-credential')), isFalse);
+    });
   });
 }

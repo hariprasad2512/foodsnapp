@@ -150,6 +150,8 @@ service cloud.firestore {
         );
 
       // --- meals ---
+      // Spark storage (§17): metadata only — the JPEG bytes live in the
+      // `assets` subcollection so list queries never drag full-res photos.
       match /meals/{mealId} {
         allow get, list: if isMember(relId);
         allow create: if isClientOf(relId)
@@ -165,8 +167,8 @@ service cloud.firestore {
             || request.resource.data.note == null
             || request.resource.data.note.size() <= 200)
           && request.resource.data.keys().hasOnly(
-            ['clientId', 'mealTag', 'note', 'photoUrl', 'thumbUrl',
-             'photoPath', 'thumbPath', 'createdAt', 'localDate', 'localTime',
+            ['clientId', 'mealTag', 'note',
+             'createdAt', 'localDate', 'localTime',
              'reaction', 'dieticianComment', 'calories', 'caloriesSource']);
         allow update: if isDieticianOf(relId)
           && request.resource.data.diff(resource.data).affectedKeys()
@@ -177,6 +179,21 @@ service cloud.firestore {
             || request.resource.data.dieticianComment == null
             || request.resource.data.dieticianComment.size() <= 300);
         allow delete: if isClientOf(relId);
+
+        // --- meal assets (photo/thumb JPEG blobs, written in the same
+        // client batch as the meal doc; immutable afterwards) ---
+        match /assets/{assetId} {
+          allow get: if isMember(relId);
+          allow list: if false; // always fetched by id (photo/thumb)
+          allow create: if isClientOf(relId)
+            && assetId in ['photo', 'thumb']
+            && request.resource.data.data is bytes
+            && request.resource.data.keys().hasOnly(['data'])
+            && (assetId == 'photo'
+              ? request.resource.data.data.size() <= 800 * 1024
+              : request.resource.data.data.size() <= 150 * 1024);
+          allow update, delete: if false;
+        }
       }
 
       // --- messages ---

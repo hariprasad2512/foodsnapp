@@ -65,7 +65,10 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         setState(() => _error = 'Something went wrong. Try again.');
       }
     } on FirebaseAuthException catch (e) {
-      setState(() => _error = authErrorMessage(e));
+      // Closing the web popup is a dismissal, not an error.
+      if (e.code != 'popup-closed-by-user') {
+        setState(() => _error = authErrorMessage(e));
+      }
     } catch (_) {
       setState(() => _error = 'Something went wrong. Try again.');
     } finally {

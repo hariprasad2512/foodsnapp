@@ -6,6 +6,7 @@ import 'data/repositories/auth_repository.dart';
 import 'data/repositories/user_repository.dart';
 import 'features/auth/role_screen.dart';
 import 'features/auth/sign_in_screen.dart';
+import 'features/camera/home_screen.dart';
 import 'features/pairing/clients_screen.dart';
 import 'features/pairing/join_screen.dart';
 import 'features/pairing/relationship_providers.dart';
@@ -69,8 +70,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/join',
         builder: (c, s) => const JoinScreen(),
       ),
-      GoRoute(
-          path: '/home', builder: (c, s) => const _Stub('S04/S05 Home — M4')),
+      GoRoute(path: '/home', builder: (c, s) => const HomeScreen()),
       GoRoute(
         path: '/meal/:relId/:mealId',
         builder: (c, s) => const _Stub('S09 Meal detail — M7'),
